@@ -1,0 +1,28 @@
+Retrieval-Augmented Generation (RAG) is a technique that combines information retrieval with large language models (LLMs) to produce more accurate and grounded answers.
+
+How RAG Works:
+1. A knowledge base is first indexed — documents are split into chunks and stored as vector embeddings in a vector database.
+2. When a user asks a question, the system retrieves the most relevant chunks using similarity search.
+3. The retrieved chunks are then passed as context to the LLM, which generates a response grounded in that context.
+
+Benefits of RAG:
+- Reduces hallucinations since the model is constrained to available context.
+- Enables use of up-to-date or private knowledge without fine-tuning.
+- Improves transparency by making sources traceable.
+
+Limitations of RAG:
+- Quality of retrieval directly impacts answer quality.
+- If the context is missing relevant info, the model may still hallucinate.
+- Chunking strategy and embedding quality are critical design choices.
+
+Hallucination in LLMs:
+Hallucination refers to when an LLM generates plausible-sounding but factually incorrect or unsupported information. This is a major challenge in production AI systems.
+
+Semantic Similarity:
+Cosine similarity between embedding vectors is commonly used to measure how semantically related two pieces of text are. A score close to 1.0 means high similarity; close to 0.0 means unrelated.
+
+FAISS (Facebook AI Similarity Search):
+FAISS is an open-source library for efficient similarity search over dense vector collections. It is widely used in RAG pipelines due to its speed and scalability.
+
+Gemini Models:
+Google's Gemini family includes models for text generation (Gemini 2.5 Flash) and text embedding (gemini-embedding-exp-03-07). Gemini 2.5 Flash is optimised for speed and cost-efficiency while maintaining strong reasoning performance.
