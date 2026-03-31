@@ -1,13 +1,9 @@
 """
-rag/generator.py — Answer generator using Gemini 2.5 Flash.
-
-Takes a user question + retrieved context chunks and produces a
-grounded answer via the Gemini 2.5 Flash model.
+rag/generator.py — Answer generator using Gemini 2.5 Flash (Async).
 """
 
-from config import client, LLM_MODEL
+from config import client, LLM_MODEL, logger
 
-# ── Prompt template ────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are a helpful assistant that answers questions strictly
 based on the provided context. If the context does not contain enough information
 to answer the question, say "I don't know based on the given context."
@@ -27,43 +23,21 @@ def build_prompt(question: str, context_chunks: list[str]) -> str:
 ## Answer:"""
 
 
-def generate_answer(question: str, context_chunks: list[str]) -> dict:
-    """
-    Generate a grounded answer using Gemini 2.5 Flash.
-
-    Args:
-        question:       The user's question.
-        context_chunks: Retrieved text chunks from the vector store.
-
-    Returns:
-        {
-            "question": str,
-            "context":  list[str],
-            "answer":   str,
-        }
-    """
+async def generate_answer(question: str, context_chunks: list[str]) -> dict:
+    """Generate a grounded answer asynchronously using Gemini."""
     prompt = build_prompt(question, context_chunks)
+    
+    logger.info("generating_answer_start", chunks_used=len(context_chunks))
 
-    response = client.models.generate_content(
+    response = await client.aio.models.generate_content(
         model=LLM_MODEL,
         contents=prompt,
     )
+    
+    logger.info("generating_answer_complete")
 
     return {
         "question": question,
         "context":  context_chunks,
         "answer":   response.text.strip(),
     }
-
-
-if __name__ == "__main__":
-    # Minimal smoke test — add a few dummy chunks to try it out
-    sample_chunks = [
-        "Python is a high-level, interpreted programming language known for its "
-        "simplicity and readability.",
-        "Python supports multiple programming paradigms including procedural, "
-        "object-oriented, and functional programming.",
-    ]
-    result = generate_answer("What is Python?", sample_chunks)
-    print("Question:", result["question"])
-    print("\nAnswer:", result["answer"])

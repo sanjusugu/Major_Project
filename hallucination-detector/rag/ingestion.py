@@ -1,66 +1,76 @@
 """
-rag/ingestion.py -- Document ingestion pipeline.
+rag/ingestion.py -- Advanced Document ingestion pipeline using ChromaDB + BM25 Sparse Search + Unstructured.
 
 Steps:
-  1. Load text from .txt or .pdf files
-  2. Chunk into overlapping segments
-  3. Embed each chunk via Gemini embedding model
-  4. Store in a FAISS index (saved to disk)
+  1. Load text from .pdf files using unstructured's semantic chunking
+  2. Emit async embeddings via Gemini
+  3. Store in a ChromaDB index for sparse search
+  4. Store in BM25 index for dense search
 """
 
 import os
-import pickle
+import chromadb
 import numpy as np
-import faiss
+import pickle
 from pathlib import Path
-from pypdf import PdfReader
-from config import client, EMBEDDING_MODEL
+
+# Advanced Parser Imports
+from unstructured.partition.pdf import partition_pdf
+from unstructured.chunking.title import chunk_by_title
+
+from rank_bm25 import BM25Okapi
+from config import client, EMBEDDING_MODEL, logger
 
 # Paths
-INDEX_PATH  = "data/faiss.index"
-CHUNKS_PATH = "data/chunks.pkl"
+DB_PATH = "data/chroma_db"
+BM25_PATH = "data/bm25.pkl"
+COLLECTION_NAME = "rag_chunks"
 
 
-# 1. Loaders
-def load_txt(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8")
+# 1. Advanced Loaders and Semantic Chunkers
+def load_and_chunk_pdf(path: str) -> list[str]:
+    """Uses unstructured layout-aware parsing and chunking by semantic title headers."""
+    logger.info("partitioning_pdf", path=path)
+    
+    # We partition directly into elements
+    # Using 'fast' strategy to ensure it works smoothly without OCR heavy dependencies,
+    # but still respecting layout elements.
+    elements = partition_pdf(path, strategy="fast")
+    
+    # Chunk semantically
+    chunks = chunk_by_title(
+        elements, 
+        max_characters=1000,
+        combine_text_under_n_chars=400,
+        new_after_n_chars=800
+    )
+    
+    return [c.text for c in chunks if str(c).strip()]
 
 
-def load_pdf(path: str) -> str:
-    reader = PdfReader(path)
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
-
-
-def load_document(path: str) -> str:
-    """Load a .txt or .pdf file and return raw text."""
+def load_document(path: str) -> list[str]:
     ext = Path(path).suffix.lower()
     if ext == ".pdf":
-        return load_pdf(path)
-    return load_txt(path)
-
-
-# 2. Chunker
-def chunk_text(text: str, chunk_size: int = 800, overlap: int = 100) -> list[str]:
-    """
-    Split text into overlapping chunks by character count.
-    chunk_size=800 chars ~150-200 tokens; overlap preserves context boundaries.
-    """
+        return load_and_chunk_pdf(path)
+    
+    # Fallback to basic text chunking
+    text = Path(path).read_text(encoding="utf-8")
     chunks = []
     start = 0
+    chunk_size = 800
+    overlap = 100
     while start < len(text):
         end = min(start + chunk_size, len(text))
         chunks.append(text[start:end].strip())
         start += chunk_size - overlap
-    return [c for c in chunks if c]  # drop empty chunks
+    return [c for c in chunks if c]
 
 
-# 3. Embedder
-def embed_texts(texts: list[str]) -> np.ndarray:
-    """
-    Embed a list of texts using the Gemini embedding model.
-    Returns a float32 numpy array of shape (N, D).
-    """
-    response = client.models.embed_content(
+# 2. Embedder (Async)
+async def embed_texts(texts: list[str]) -> np.ndarray:
+    """Async embedding of chunks."""
+    logger.info("embedding_batch", size=len(texts))
+    response = await client.aio.models.embed_content(
         model=EMBEDDING_MODEL,
         contents=texts,
     )
@@ -68,61 +78,55 @@ def embed_texts(texts: list[str]) -> np.ndarray:
     return np.array(vectors, dtype=np.float32)
 
 
-# 4. FAISS store
-def build_index(embeddings: np.ndarray) -> faiss.IndexFlatIP:
-    """Build an inner-product (cosine after normalisation) FAISS index."""
-    faiss.normalize_L2(embeddings)          # normalise for cosine similarity
-    dim   = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(embeddings)
-    return index
+# 3. Hybrid Store Wrapper
+def save_store(embeddings: np.ndarray, chunks: list[str]) -> None:
+    os.makedirs(DB_PATH, exist_ok=True)
+    
+    # A. ChromaDB Dense Store
+    chroma_client = chromadb.PersistentClient(path=DB_PATH)
+    collection = chroma_client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"}
+    )
+    
+    try:
+        if collection.count() > 0:
+            collection.delete(ids=collection.get()["ids"])
+    except Exception:
+        pass
+    
+    ids = [f"chunk_{i}" for i in range(len(chunks))]
+    collection.upsert(
+        ids=ids,
+        embeddings=embeddings.tolist(),
+        documents=chunks
+    )
+    logger.info("saved_to_chroma", num_chunks=len(chunks))
+    
+    # B. BM25 Sparse Store
+    tokenized_chunks = [chunk.lower().split() for chunk in chunks]
+    bm25 = BM25Okapi(tokenized_chunks)
+    
+    with open(BM25_PATH, "wb") as f:
+        pickle.dump({"bm25": bm25, "chunks": chunks}, f)
+        
+    logger.info("saved_to_bm25", num_chunks=len(chunks))
 
 
-def save_store(index: faiss.IndexFlatIP, chunks: list[str]) -> None:
-    os.makedirs("data", exist_ok=True)
-    faiss.write_index(index, INDEX_PATH)
-    with open(CHUNKS_PATH, "wb") as f:
-        pickle.dump(chunks, f)
-    print(f"[OK] Saved {len(chunks)} chunks -> {INDEX_PATH}")
-
-
-def load_store() -> tuple[faiss.IndexFlatIP, list[str]]:
-    index  = faiss.read_index(INDEX_PATH)
-    with open(CHUNKS_PATH, "rb") as f:
-        chunks = pickle.load(f)
-    return index, chunks
-
-
-# 5. Pipeline entry-point
-def ingest(file_paths: list[str]) -> None:
-    """
-    Full ingestion pipeline:
-      load -> chunk -> embed -> build FAISS index -> save to disk
-    """
+# 4. Pipeline entry-point
+async def ingest(file_paths: list[str]) -> None:
+    """Full asynchronous ingestion pipeline with hybrid storage."""
     all_chunks: list[str] = []
 
     for path in file_paths:
-        print(f"[*] Loading: {path}")
-        text   = load_document(path)
-        chunks = chunk_text(text)
-        print(f"    -> {len(chunks)} chunks")
+        chunks = load_document(path)
+        logger.info("document_processed", path=path, chunks_generated=len(chunks))
         all_chunks.extend(chunks)
 
-    print(f"\n[*] Embedding {len(all_chunks)} chunks ...")
-    embeddings = embed_texts(all_chunks)
+    if not all_chunks:
+        logger.warning("no_chunks_to_embed")
+        return
 
-    print("[*] Building FAISS index ...")
-    index = build_index(embeddings)
-
-    save_store(index, all_chunks)
-
-
-if __name__ == "__main__":
-    # Quick test: ingest every file in data/docs/
-    docs_dir = Path("data/docs")
-    docs_dir.mkdir(parents=True, exist_ok=True)
-    files = [str(p) for p in docs_dir.glob("*") if p.suffix in {".txt", ".pdf"}]
-    if not files:
-        print("[!] No documents found in data/docs/. Add .txt or .pdf files first.")
-    else:
-        ingest(files)
+    embeddings = await embed_texts(all_chunks)
+    save_store(embeddings, all_chunks)
+    logger.info("ingestion_pipeline_complete")

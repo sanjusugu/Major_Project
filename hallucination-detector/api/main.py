@@ -1,57 +1,55 @@
 """
-api/main.py -- FastAPI server for the RAG Hallucination Detection System.
-
-Phases active:
-  Phase 1 -- RAG (ingest, retrieve, generate)
-  Phase 2 -- Semantic Similarity
-  Phase 3 -- Gemini LLM-as-a-Judge
-  Phase 4 -- Hybrid Scoring (gating + weighted final score)
-
-Run:
-    uvicorn api.main:app --reload --port 8000
+api/main.py -- FastAPI server for the Async RAG Hallucination Detection System.
 """
 
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from rag.ingestion import ingest
-from rag.retriever import Retriever
+from config import logger
+from rag.ingestion import ingest, DB_PATH
+from rag.retriever import Retriever  # now named Retriever but handles async
 from rag.generator import generate_answer
 from verifier.similarity import compute_similarity
 from verifier.scoring import compute_hybrid_score
 
-INDEX_PATH = "data/faiss.index"
 _retriever: Retriever | None = None
 
-
-# ── Startup ────────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _retriever
+    logger.info("application_startup")
     docs_dir = Path("data/docs")
-    if not os.path.exists(INDEX_PATH):
-        files = [str(p) for p in docs_dir.glob("*") if p.suffix in {".txt", ".pdf"}]
+    
+    # If no DB_PATH exists, auto-ingest
+    if not os.path.exists(DB_PATH):
+        files = [str(p) for p in docs_dir.glob("*") if p.suffix == ".pdf"]
         if files:
-            print("[*] Auto-ingesting documents on startup...")
-            ingest(files)
-    if os.path.exists(INDEX_PATH):
-        _retriever = Retriever()
-        print("[OK] Retriever loaded.")
+            logger.info("auto_ingesting_startup", files=files)
+            await ingest(files)
+            
+    if os.path.exists(DB_PATH):
+        try:
+            _retriever = Retriever()
+            logger.info("retriever_loaded")
+        except Exception as e:
+            logger.error("retriever_load_failure", error=str(e))
     else:
-        print("[!] No index found. Call POST /ingest first.")
+        logger.warning("no_index_found")
     yield
+    logger.info("application_shutdown")
 
 
-# ── App ────────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="RAG Hallucination Detector",
-    description="Detects hallucinations using Gemini 2.5 Flash — Phase 1-4 active.",
-    version="0.4.0",
+    title="Async RAG Hallucination Detector",
+    description="Detects hallucinations using Gemini 2.5 Flash, Hybrid Search (Dense+Sparse), and FlashRank.",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -62,8 +60,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ── Schemas ────────────────────────────────────────────────────────────────────
+@app.get("/", include_in_schema=False)
+async def serve_ui():
+    return FileResponse("static/index.html")
+
+
 class AskRequest(BaseModel):
     question: str = Field(..., example="What is RAG?")
     top_k:    int = Field(4, ge=1, le=20)
@@ -73,11 +76,11 @@ class SimilarityResult(BaseModel):
     max_score:    float
     mean_score:   float
     chunk_scores: list[float]
-    label:        str          # HIGH / MEDIUM / LOW
+    label:        str
 
 
 class JudgeResult(BaseModel):
-    verdict:     str           # SUPPORTED / PARTIAL / NOT_SUPPORTED
+    verdict:     str
     confidence:  float
     judge_score: float
     explanation: str
@@ -85,7 +88,7 @@ class JudgeResult(BaseModel):
 
 class HybridResult(BaseModel):
     final_score:   float
-    gating_label:  str         # SKIP_JUDGE_LOW | SEND_TO_JUDGE | OPTIONAL_JUDGE
+    gating_label:  str
     judge_was_run: bool
 
 
@@ -95,68 +98,72 @@ class AskResponse(BaseModel):
     similarity: SimilarityResult
     judge:      JudgeResult | None
     hybrid:     HybridResult
-    phases:     str = "Phase 1 + Phase 2 + Phase 3 + Phase 4"
 
 
-class IngestResponse(BaseModel):
-    message:    str
-    files_used: list[str]
-
-
-# ── Routes ─────────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["System"])
 def health():
     return {
         "status":       "ok",
-        "index_ready":  os.path.exists(INDEX_PATH),
-        "phases_active": [
-            "Phase 1 - RAG",
-            "Phase 2 - Similarity",
-            "Phase 3 - Judge",
-            "Phase 4 - Hybrid Scoring",
+        "index_ready":  _retriever is not None,
+        "features": [
+            "Async Execution",
+            "Advanced Unstructured Parsing",
+            "Hybrid Search (BM25 + Chroma)",
+            "Cross-Encoder Re-ranking",
+            "LLM-as-a-Judge Evaluation"
         ],
     }
 
 
-@app.post("/ingest", response_model=IngestResponse, tags=["System"])
-def ingest_docs():
-    """Ingest all .txt/.pdf files from data/docs/ into the FAISS index."""
-    global _retriever
+@app.post("/ingest", tags=["System"])
+async def ingest_docs(background_tasks: BackgroundTasks):
+    """Trigger background ingestion of all .pdf files from data/docs/."""
     docs_dir = Path("data/docs")
-    files = [str(p) for p in docs_dir.glob("*") if p.suffix in {".txt", ".pdf"}]
+    files = [str(p) for p in docs_dir.glob("*") if p.suffix == ".pdf"]
     if not files:
-        raise HTTPException(status_code=404, detail="No .txt or .pdf files found in data/docs/")
-    ingest(files)
-    _retriever = Retriever()
-    return {"message": f"Ingested {len(files)} file(s) successfully.", "files_used": files}
+        raise HTTPException(status_code=404, detail="No .pdf files found in data/docs/")
+    
+    async def task(file_paths):
+        global _retriever
+        logger.info("background_ingestion_started")
+        await ingest(file_paths)
+        _retriever = Retriever()
+        logger.info("background_ingestion_complete")
+
+    background_tasks.add_task(task, files)
+    return {"message": f"Started background ingestion for {len(files)} file(s)."}
 
 
 @app.post("/ask", response_model=AskResponse, tags=["Pipeline"])
-def ask(req: AskRequest):
-    """
-    Full pipeline: RAG -> Similarity -> Judge (gated) -> Hybrid Score.
-
-    Returns a structured response with the answer, similarity scores,
-    judge verdict (if run), and the final hybrid hallucination score.
-    """
+async def ask(req: AskRequest):
+    """Full asynchronous pipeline: Retrieve -> Generate -> Similarity -> Judge"""
+    logger.info("ask_request_received", question=req.question)
+    
     if _retriever is None:
         raise HTTPException(status_code=503, detail="Index not ready. Call POST /ingest first.")
 
-    # Phase 1: Retrieve + Generate
-    hits           = _retriever.retrieve(req.question, top_k=req.top_k)
+    hits = await _retriever.retrieve(req.question, top_k=req.top_k)
     context_chunks = [h["chunk"] for h in hits]
-    answer         = generate_answer(req.question, context_chunks)["answer"]
+    
+    if not context_chunks:
+        logger.warning("no_chunks_found_for_question")
+    
+    # Generate answer
+    gen_result = await generate_answer(req.question, context_chunks)
+    answer = gen_result["answer"]
 
-    # Phase 2: Similarity (computed first so we can pass it to the hybrid scorer)
-    sim_result = compute_similarity(answer, context_chunks)
+    # Semantic similarity phase
+    sim_result = await compute_similarity(answer, context_chunks)
 
-    # Phase 3 + 4: Hybrid scoring (gated judge + weighted combination)
-    hybrid = compute_hybrid_score(answer, context_chunks, sim_result=sim_result)
+    # Hybrid scoring phase (Judgement)
+    hybrid = await compute_hybrid_score(answer, context_chunks, sim_result=sim_result)
 
     judge_out = None
     if hybrid["judge"] is not None:
         judge_out = JudgeResult(**hybrid["judge"])
 
+    logger.info("ask_request_complete", final_score=hybrid["final_score"])
+    
     return AskResponse(
         question   = req.question,
         answer     = answer,

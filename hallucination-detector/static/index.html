@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Hallucination Detector</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="glass-header">
+            <div class="logo">
+                <div class="gradient-circle"></div>
+                <h1>RAG <span>Detector</span></h1>
+            </div>
+            <button id="ingest-btn" class="primary-btn">
+                <span class="icon">📄</span> Sync Documents
+            </button>
+        </header>
+
+        <main class="main-content">
+            <div class="input-section glass-panel">
+                <h2>Ask your Document</h2>
+                <div class="input-group">
+                    <input type="text" id="question-input" placeholder="E.g., What is RAG and how does it reduce hallucination?" autocomplete="off">
+                    <button id="ask-btn" class="glow-btn">Generate</button>
+                </div>
+            </div>
+
+            <div id="loading" class="loading-state hidden">
+                <div class="spinner"></div>
+                <p>Analyzing context and verifying facts...</p>
+            </div>
+
+            <div id="results" class="results-section hidden">
+                <div class="result-card answer-card glass-panel">
+                    <h3>Generated Answer</h3>
+                    <p id="res-answer"></p>
+                </div>
+                
+                <div class="metrics-grid">
+                    <div class="metric-card glass-panel">
+                        <h4>Similarity (Phase 2)</h4>
+                        <div class="score-display">
+                            <span id="res-sim-score" class="score-value">0.0</span>
+                            <span id="res-sim-label" class="badge">N/A</span>
+                        </div>
+                        <p class="subtext">Cosine Similarity to Context</p>
+                    </div>
+
+                    <div class="metric-card glass-panel">
+                        <h4>LLM Judge (Phase 3)</h4>
+                        <div class="score-display">
+                            <span id="res-judge-verdict" class="verdict-value">N/A</span>
+                        </div>
+                        <p id="res-judge-exp" class="explanation">No explanation provided.</p>
+                    </div>
+
+                    <div class="metric-card glass-panel hybrid-card">
+                        <h4>Hybrid Score (Phase 4)</h4>
+                        <div class="score-display large">
+                            <span id="res-hybrid-score" class="score-value">0.0</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div id="res-hybrid-bar" class="progress-bar"></div>
+                        </div>
+                        <p id="res-hybrid-gating" class="subtext">Gating: N/A</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

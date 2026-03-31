@@ -1,38 +1,37 @@
 """
-main.py -- End-to-end pipeline test (Phase 1 -> 4).
+main.py -- End-to-end async pipeline test (Phase 1 -> 4).
 Run: python main.py
 """
 
 import os
+import asyncio
 from pathlib import Path
-from rag.ingestion import ingest
+from rag.ingestion import ingest, DB_PATH
 from rag.retriever import Retriever
 from rag.generator import generate_answer
 from verifier.similarity import compute_similarity
 from verifier.scoring import compute_hybrid_score
 
-INDEX_PATH = "data/faiss.index"
 
-
-def main():
+async def test_run():
     # Phase 1: Ingest
-    if not os.path.exists(INDEX_PATH):
+    if not os.path.exists(DB_PATH):
         docs_dir = Path("data/docs")
-        files    = [str(p) for p in docs_dir.glob("*") if p.suffix in {".txt", ".pdf"}]
+        files    = [str(p) for p in docs_dir.glob("*") if p.suffix == ".pdf"]
         if not files:
             print("[!] No documents found in data/docs/.")
             return
-        print("[*] Ingesting documents...\n")
-        ingest(files)
+        print("[*] Ingesting documents asynchronously...\n")
+        await ingest(files)
     else:
-        print("[OK] FAISS index already exists -- skipping ingestion.\n")
+        print("[OK] ChromaDB already exists -- skipping ingestion.\n")
 
     # Phase 1: Retrieve + Generate
     question = "What is RAG and how does it reduce hallucinations?"
     print(f"[?] Question: {question}\n")
 
     retriever      = Retriever()
-    hits           = retriever.retrieve(question, top_k=4)
+    hits           = await retriever.retrieve(question, top_k=4)
     context_chunks = [h["chunk"] for h in hits]
 
     print(f"[*] Retrieved {len(hits)} chunks:")
@@ -40,12 +39,13 @@ def main():
         print(f"  [{i}] score={h['score']:.4f}  -> {h['chunk'][:90].strip()} ...")
 
     print("\n[*] Generating answer with Gemini 2.5 Flash...")
-    answer = generate_answer(question, context_chunks)["answer"]
+    ans_res = await generate_answer(question, context_chunks)
+    answer = ans_res["answer"]
     print(f"\n{'='*60}\nANSWER:\n{'='*60}\n{answer}")
 
     # Phase 2: Similarity
     print("\n[*] Computing similarity (Phase 2)...")
-    sim = compute_similarity(answer, context_chunks)
+    sim = await compute_similarity(answer, context_chunks)
     print(f"\n{'='*60}\nSIMILARITY (Phase 2):\n{'='*60}")
     print(f"  Max Score  : {sim['max_score']}  -> {sim['label']}")
     print(f"  Mean Score : {sim['mean_score']}")
@@ -53,7 +53,7 @@ def main():
 
     # Phase 3 + 4: Hybrid scoring
     print("\n[*] Computing hybrid score (Phase 3 + 4)...")
-    hybrid = compute_hybrid_score(answer, context_chunks, sim_result=sim)
+    hybrid = await compute_hybrid_score(answer, context_chunks, sim_result=sim)
     judge  = hybrid["judge"]
 
     print(f"\n{'='*60}\nHYBRID SCORE (Phase 4):\n{'='*60}")
@@ -68,4 +68,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(test_run())

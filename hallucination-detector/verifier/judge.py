@@ -1,28 +1,17 @@
 """
-verifier/judge.py -- Gemini LLM-as-a-Judge Module (Phase 3)
-
-Uses Gemini 2.5 Flash to verify whether the generated answer is supported
-by the retrieved context, outputting a structured verdict + confidence score.
-
-Verdict options:
-  SUPPORTED     -- answer is clearly grounded in the context
-  PARTIAL       -- answer is partially grounded; some claims may be unsupported
-  NOT_SUPPORTED -- answer contradicts or goes beyond the context
+verifier/judge.py -- Gemini LLM-as-a-Judge Module (Phase 3) Async
 """
 
 import re
 import json
-from config import client, LLM_MODEL
+from config import client, LLM_MODEL, logger
 
-
-# ── Score mapping ──────────────────────────────────────────────────────────────
 VERDICT_SCORES = {
     "SUPPORTED":     1.0,
     "PARTIAL":       0.6,
     "NOT_SUPPORTED": 0.0,
 }
 
-# ── Judge prompt ───────────────────────────────────────────────────────────────
 JUDGE_PROMPT_TEMPLATE = """You are an impartial fact-checking judge.
 
 Your task is to evaluate whether the given ANSWER is supported by the provided CONTEXT.
@@ -52,30 +41,20 @@ Rules:
 - Output ONLY the JSON object. No markdown, no extra text.
 """
 
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
 def _build_prompt(answer: str, context_chunks: list[str]) -> str:
     context_text = "\n\n---\n\n".join(context_chunks)
     return JUDGE_PROMPT_TEMPLATE.format(context=context_text, answer=answer)
 
-
 def _parse_response(raw: str) -> dict:
-    """
-    Extract and parse the JSON from the model's response.
-    Handles cases where the model wraps the JSON in markdown code fences.
-    """
-    # Strip markdown fences if present
     cleaned = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError:
-        # Fallback: try to locate the first {...} block
+        logger.error("judge_parse_failure", raw=raw)
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if match:
             data = json.loads(match.group())
         else:
-            # Cannot parse -- return a safe default
             return {
                 "verdict":     "PARTIAL",
                 "confidence":  0.5,
@@ -87,10 +66,7 @@ def _parse_response(raw: str) -> dict:
     confidence = float(data.get("confidence", 0.5))
     explanation= str(data.get("explanation", ""))
 
-    # Clamp confidence to [0, 1]
     confidence = max(0.0, min(1.0, confidence))
-
-    # Validate verdict
     if verdict not in VERDICT_SCORES:
         verdict = "PARTIAL"
 
@@ -100,26 +76,11 @@ def _parse_response(raw: str) -> dict:
         "explanation": explanation,
     }
 
-
-# ── Main function ──────────────────────────────────────────────────────────────
-def judge_answer(answer: str, context_chunks: list[str]) -> dict:
-    """
-    Use Gemini 2.5 Flash to judge if the answer is supported by the context.
-
-    Args:
-        answer:         The LLM-generated answer string.
-        context_chunks: List of retrieved text chunks used as context.
-
-    Returns:
-        {
-            "verdict":      str,    # SUPPORTED / PARTIAL / NOT_SUPPORTED
-            "confidence":   float,  # 0.0 - 1.0
-            "judge_score":  float,  # verdict_score * confidence
-            "explanation":  str,
-        }
-    """
+async def judge_answer(answer: str, context_chunks: list[str]) -> dict:
+    logger.info("starting_llm_judge")
     prompt   = _build_prompt(answer, context_chunks)
-    response = client.models.generate_content(
+    
+    response = await client.aio.models.generate_content(
         model=LLM_MODEL,
         contents=prompt,
     )
@@ -129,32 +90,11 @@ def judge_answer(answer: str, context_chunks: list[str]) -> dict:
     verdict_score = VERDICT_SCORES.get(parsed["verdict"], 0.6)
     judge_score   = round(verdict_score * parsed["confidence"], 4)
 
+    logger.info("llm_judge_complete", verdict=parsed["verdict"], score=judge_score)
+
     return {
         "verdict":     parsed["verdict"],
         "confidence":  parsed["confidence"],
         "judge_score": judge_score,
         "explanation": parsed["explanation"],
     }
-
-
-# ── Quick standalone test ──────────────────────────────────────────────────────
-if __name__ == "__main__":
-    answer = (
-        "RAG reduces hallucinations by constraining the LLM to the provided "
-        "context, ensuring answers are grounded in retrieved documents."
-    )
-    chunks = [
-        "Benefits of RAG: Reduces hallucinations since the model is constrained "
-        "to available context. Enables use of up-to-date or private knowledge.",
-        "Retrieval-Augmented Generation (RAG) combines information retrieval "
-        "with LLMs to produce more accurate and grounded answers.",
-    ]
-
-    result = judge_answer(answer, chunks)
-
-    print("Judge Report")
-    print("=" * 40)
-    print(f"  Verdict     : {result['verdict']}")
-    print(f"  Confidence  : {result['confidence']}")
-    print(f"  Judge Score : {result['judge_score']}")
-    print(f"  Explanation : {result['explanation']}")
