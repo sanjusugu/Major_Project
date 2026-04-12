@@ -27,21 +27,27 @@ async def lifespan(app: FastAPI):
     logger.info("application_startup")
     docs_dir = Path("data/docs")
     
-    # Check if we have data in MongoDB
     try:
+        # Scan for all PDFs
+        files = [str(p) for p in docs_dir.glob("*") if p.suffix == ".pdf"]
+        
+        if files:
+            logger.info("checking_for_new_documents", count=len(files))
+            # The refactored ingest() now automatically skips existing files internally
+            summary = await ingest(files)
+            if summary.get("ingested"):
+                logger.info("new_documents_ingested", files=summary["ingested"])
+            else:
+                logger.info("no_new_documents_found")
+        
+        # Initialize retriever if we have any data at all
         count = collection.count_documents({})
-        if count == 0:
-            files = [str(p) for p in docs_dir.glob("*") if p.suffix == ".pdf"]
-            if files:
-                logger.info("auto_ingesting_startup", files=files)
-                await ingest(files)
-                count = collection.count_documents({})
-                
         if count > 0:
             _retriever = Retriever()
             logger.info("retriever_loaded", chunk_count=count)
         else:
             logger.warning("no_data_in_mongodb")
+            
     except Exception as e:
         logger.error("startup_failed", error=str(e))
     yield
