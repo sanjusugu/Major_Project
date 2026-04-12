@@ -1,42 +1,44 @@
-# 🔎 RAG Hallucination Detector (Enterprise Edition)
+# 🔎 RAG Hallucination Detector (Industrial Enterprise Edition)
 
-A high-performance, asynchronous Retrieval-Augmented Generation (RAG) system with a multi-layered hallucination detection pipeline. This system ensures that an LLM's generated answers are strictly grounded in user-provided documents using hybrid retrieval methods and an "LLM-as-a-Judge" grading mechanism.
+A professional, high-performance, asynchronous Retrieval-Augmented Generation (RAG) system with a multi-layered hallucination detection pipeline. This system ensures that an LLM's generated answers are strictly grounded in user-provided documents using hybrid retrieval methods, local intelligence, and a logical "LLM-as-a-Judge" grading mechanism.
 
-## ✨ Key Features
-- **Async Architecture:** Fully non-blocking FastAPI implementation capable of handling concurrent generation and evaluation tasks.
-- **Advanced Document Parsing:** Uses `unstructured` to accurately semantically carve PDFs into coherent sections based on visual titles/headers, replacing blind character counts.
-- **Hybrid Search (Dense + Sparse):** Synthesizes Google Gemini Embeddings in **ChromaDB** alongside tokenized **BM25** sparse retrieval for both semantic meaning and precise keyword matching.
-- **Cross-Encoder Re-Ranking:** Implements `FlashRank` to strictly re-rank the unionized BM25 and Chroma results, radically increasing contextual awareness.
-- **Auto-Gating Hallucination Scoring:** A 4-phase system that evaluates Cosine Similarity between the generated answer and retrieved chunk. If the score is too low, it skips LLM evaluation. Otherwise, it invokes Gemini 2.5 Flash strictly as a Judge, resulting in a **Hybrid Supported/Not-Supported Score**.
-- **Modern Web Dashboard:** A beautiful Glassmorphism Vanilla JS/HTML frontend instantly accessible out-of-the-box.
+## ✨ Industrial Features (New)
+- **MongoDB Persistence:** Switched from local files to a scalable **MongoDB** data layer for document chunks and vector storage.
+- **Local Embedded Intelligence:** Uses the **Sentence-Transformers (`all-MiniLM-L6-v2`)** model running locally. No more cloud latency or API costs for embedding generation.
+- **Async Pipeline:** Fully non-blocking FastAPI implementation capable of handling concurrent generation and evaluation tasks.
+- **Advanced Document Parsing:** Uses `unstructured` to semantically chunk PDFs by actual titles and headers.
+- **Hybrid Search (Dense + Sparse):** Combines **MongoDB Vector Search** with tokenized **BM25** for high-precision retrieval.
+- **Cross-Encoder Re-Ranking:** Implements `FlashRank` to strictly refine retrieval results before they reach the LLM.
+- **Auto-Gating Hallucination Scoring:** A 4-phase system that evaluates Cosine Similarity and invokes Gemini 2.5 Flash strictly as a Judge for a final **Hybrid Safety Score**.
+- **Modern Dashboard:** A beautiful Glassmorphism UI accessible out-of-the-box.
 
 ---
 
 ## 🏗 System Pipeline (Phases 1-4)
-1. **Phase 1 (RAG Engine):** Parses PDF -> BM25 + Chroma Store -> Reranks -> LLM Generates Answer.
-2. **Phase 2 (Semantic Similarity):** Quickly calculates mathematical Cosine Similarity between the answer and retrieved source facts.
-3. **Phase 3 (LLM Judge):** Asks the LLM to inspect its own answer against the context chunks to declare `SUPPORTED`, `PARTIAL`, or `NOT_SUPPORTED`.
-4. **Phase 4 (Hybrid Score):** Generates a definitive fractional final confidence score leveraging both similarity matrices and the logical judge.
+1. **Phase 1 (RAG Engine):** Parses PDF -> BM25 + MongoDB Store -> Reranks -> LLM Generates Answer.
+2. **Phase 2 (Semantic Similarity):** Calculates mathematical Cosine Similarity using **local** embedding models.
+3. **Phase 3 (LLM Judge):** Gemini 2.5 Flash inspects the logical grounding of claims against Source Context.
+4. **Phase 4 (Hybrid Score):** Synthesizes logical analysis and mathematical similarity into a final safety metric.
 
 ---
 
 ## 🛠 Prerequisites
-
 1. Python 3.10+
-2. A valid Google Gemini API Key
+2. **MongoDB** (Local or Atlas instance)
+3. Google Gemini API Key
 
 ---
 
 ## 🚀 Quick Setup & Installation
 
-### 1. Clone & Set Up the Virtual Environment
+### 1. Clone & Set Up Environment
 ```bash
 git clone https://github.com/sanjusugu/Major_Project.git
 cd Major_Project/hallucination-detector
 python -m venv venv
 ```
 
-**Activate the Venv:**
+**Activate Venv:**
 - Windows: `.\venv\Scripts\Activate.ps1`
 - Mac/Linux: `source venv/bin/activate`
 
@@ -44,12 +46,12 @@ python -m venv venv
 ```bash
 pip install -r requirements.txt
 ```
-> *Note: By installing `unstructured[pdf]`, it may pull specific python layout packages like `pdfminer.six` internally.*
 
 ### 3. Environment Configuration
-Create a `.env` file in the root `hallucination-detector/` directory:
+Create a `.env` file in the root directory:
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
+MONGO_URI=mongodb://localhost:27017/  # Optional: Defaults to local
 ```
 
 ---
@@ -57,26 +59,23 @@ GEMINI_API_KEY=your_gemini_api_key_here
 ## 💻 Running the Application
 
 ### Adding Documents
-Place any `.pdf` files you want the model to read into the `data/docs/` directory.
+Place any `.pdf` files into the `data/docs/` directory.
 
-### Boot the Application
-Run the FastAPI web application using Uvicorn:
+### Launch the System
+Launch the integrated server and database connection:
 ```bash
-uvicorn api.main:app --reload --port 8000
+python main.py
 ```
-> The server will automatically detect the `.pdf` files and asynchronously ingest them into ChromaDB and the BM25 Index during startup!
+> On the first run, the local embedding model will download, and your PDFs will be automatically ingested into MongoDB.
 
 ### Access the Web UI Dashboard
-Once the server boot log says `Application startup complete`, open your browser to:
+Open your browser to:
 👉 **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
-
-You can dynamically prompt questions across your files and immediately view the generated score breakdown.
 
 ---
 
 ## 🧪 Automated Testing
-If you would like to run head-less verifications natively strictly through terminals without browsers, you can utilize the included testing script:
+Run the headless verification script to check Grounded vs. Hallucinated responses:
 ```bash
 python test_api.py
 ```
-This script queries the `/health` endpoint alongside testing **Grounded** specific questions and **Ungrounded** hallucinated queries to verify the pipeline catches invalid references perfectly.
