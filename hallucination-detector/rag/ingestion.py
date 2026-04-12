@@ -1,15 +1,14 @@
 """
-rag/ingestion.py -- Advanced Document ingestion pipeline using ChromaDB + BM25 Sparse Search + Unstructured.
+rag/ingestion.py -- Advanced Document ingestion pipeline using MongoDB + BM25 Sparse Search + Unstructured.
 
 Steps:
   1. Load text from .pdf files using unstructured's semantic chunking
   2. Emit async embeddings via Gemini
-  3. Store in a ChromaDB index for sparse search
-  4. Store in BM25 index for dense search
+  3. Store in MongoDB for dense/vector search
+  4. Store in BM25 index for sparse search
 """
 
 import os
-import chromadb
 import numpy as np
 import pickle
 from pathlib import Path
@@ -19,12 +18,10 @@ from unstructured.partition.pdf import partition_pdf
 from unstructured.chunking.title import chunk_by_title
 
 from rank_bm25 import BM25Okapi
-from config import client, EMBEDDING_MODEL, logger
+from config import client, embed_model, logger, collection, db
 
 # Paths
-DB_PATH = "data/chroma_db"
 BM25_PATH = "data/bm25.pkl"
-COLLECTION_NAME = "rag_chunks"
 
 
 # 1. Advanced Loaders and Semantic Chunkers
@@ -33,8 +30,6 @@ def load_and_chunk_pdf(path: str) -> list[str]:
     logger.info("partitioning_pdf", path=path)
     
     # We partition directly into elements
-    # Using 'fast' strategy to ensure it works smoothly without OCR heavy dependencies,
-    # but still respecting layout elements.
     elements = partition_pdf(path, strategy="fast")
     
     # Chunk semantically
@@ -68,45 +63,39 @@ def load_document(path: str) -> list[str]:
 
 # 2. Embedder (Async)
 async def embed_texts(texts: list[str]) -> np.ndarray:
-    """Async embedding of chunks."""
-    logger.info("embedding_batch", size=len(texts))
-    response = await client.aio.models.embed_content(
-        model=EMBEDDING_MODEL,
-        contents=texts,
-    )
-    vectors = [e.values for e in response.embeddings]
-    return np.array(vectors, dtype=np.float32)
+    """Async wrapper for local embedding generation."""
+    logger.info("embedding_batch_local", size=len(texts))
+    # Running in executor if needed for true async, but small models are fast
+    embeddings = embed_model.encode(texts)
+    return np.array(embeddings, dtype=np.float32)
 
 
 # 3. Hybrid Store Wrapper
 def save_store(embeddings: np.ndarray, chunks: list[str]) -> None:
-    os.makedirs(DB_PATH, exist_ok=True)
+    # A. MongoDB Dense Store (Vector Search)
+    logger.info("saving_to_mongodb", num_chunks=len(chunks))
     
-    # A. ChromaDB Dense Store
-    chroma_client = chromadb.PersistentClient(path=DB_PATH)
-    collection = chroma_client.get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"}
-    )
+    # Clear existing data for fresh ingestion (Optional based on use case)
+    collection.delete_many({})
     
-    try:
-        if collection.count() > 0:
-            collection.delete(ids=collection.get()["ids"])
-    except Exception:
-        pass
+    documents = []
+    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings.tolist())):
+        documents.append({
+            "chunk_id": f"chunk_{i}",
+            "text": chunk,
+            "embedding": embedding
+        })
     
-    ids = [f"chunk_{i}" for i in range(len(chunks))]
-    collection.upsert(
-        ids=ids,
-        embeddings=embeddings.tolist(),
-        documents=chunks
-    )
-    logger.info("saved_to_chroma", num_chunks=len(chunks))
+    if documents:
+        collection.insert_many(documents)
+    
+    logger.info("saved_to_mongodb", num_chunks=len(chunks))
     
     # B. BM25 Sparse Store
     tokenized_chunks = [chunk.lower().split() for chunk in chunks]
     bm25 = BM25Okapi(tokenized_chunks)
     
+    os.makedirs(os.path.dirname(BM25_PATH), exist_ok=True)
     with open(BM25_PATH, "wb") as f:
         pickle.dump({"bm25": bm25, "chunks": chunks}, f)
         

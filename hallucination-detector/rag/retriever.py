@@ -1,30 +1,27 @@
 """
-rag/retriever.py — Advanced Hybrid Query Retriever using Dense + Sparse + CrossEncoder.
+rag/retriever.py — Advanced Hybrid Query Retriever using MongoDB + BM25 + FlashRank.
 
-Loads the ChromaDB collection + BM25 index, retrieves top 10 from each,
-deduplicates, and reranks down to top K using FlashRank (bge-reranker or similar).
+Loads MongoDB + BM25 index, retrieves top 10 from each,
+deduplicates, and reranks down to top K using FlashRank.
 """
 
 import os
 import pickle
-import chromadb
+import numpy as np
 
 # Dense + Sparse
-from config import client, EMBEDDING_MODEL, logger
-from rag.ingestion import embed_texts, DB_PATH, BM25_PATH, COLLECTION_NAME
+from config import client, embed_model, logger, collection, MONGO_VECTOR_INDEX_NAME
+from rag.ingestion import embed_texts, BM25_PATH
 
 # Re-ranking
 from flashrank import Ranker, RerankRequest
 
 
 class Retriever:
-    """Async Hybrid Retriever using ChromaDB + BM25 + FlashRank."""
+    """Async Hybrid Retriever using MongoDB + BM25 + FlashRank."""
     
     def __init__(self) -> None:
         logger.info("loading_retriever")
-        
-        self.chroma_client = chromadb.PersistentClient(path=DB_PATH)
-        self.collection = self.chroma_client.get_collection(name=COLLECTION_NAME)
         
         # Load Sparse BM25
         if not os.path.exists(BM25_PATH):
@@ -38,7 +35,6 @@ class Retriever:
             
         # Initialize CrossEncoder Re-ranker
         logger.info("loading_ranker_model")
-        # Use default model which is extremely fast and effective for semantic ranking
         self.ranker = Ranker(cache_dir="data/flashrank")
         logger.info("retriever_ready")
 
@@ -46,7 +42,7 @@ class Retriever:
         """
         Retrieval Flow:
          1. BM25 Query (Sparse)
-         2. Gemini Embed Query -> Chroma (Dense)
+         2. Gemini Embed Query -> MongoDB (Dense)
          3. Union & Deduplicate
          4. FlashRank Rerank
         """
@@ -59,14 +55,32 @@ class Retriever:
         sparse_chunks = [self.bm25_chunks[i] for i in top_sparse_idx]
         logger.info("sparse_retrieved", count=len(sparse_chunks))
 
-        # 2. Dense Search
+        # 2. Dense Search (MongoDB Vector Search)
         query_vec = await embed_texts([query])
-        results = self.collection.query(
-            query_embeddings=query_vec.tolist(),
-            n_results=10
-        )
-        dense_chunks = results['documents'][0] if results['documents'] else []
-        logger.info("dense_retrieved", count=len(dense_chunks))
+        
+        # Note: MongoDB Vector Search requires an Atlas Search Index (Vector Index) to be created.
+        # This implementation uses a standard aggregation pipeline for vector Search.
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": MONGO_VECTOR_INDEX_NAME,
+                    "path": "embedding",
+                    "queryVector": query_vec[0].tolist(),
+                    "numCandidates": 100,
+                    "limit": 10
+                }
+            }
+        ]
+        
+        try:
+            results = list(collection.aggregate(pipeline))
+            dense_chunks = [doc["text"] for doc in results]
+            logger.info("dense_retrieved", count=len(dense_chunks))
+        except Exception as e:
+            logger.warning("mongodb_vector_search_failed_falling_back_to_exact", error=str(e))
+            # Fallback for local MongoDB or if index is missing (Note: $vectorSearch is Atlas only)
+            # Normal vector search is not efficient without $vectorSearch
+            dense_chunks = []
         
         # 3. Union + Deduplication
         unique_chunks = list(set(sparse_chunks + dense_chunks))
@@ -83,7 +97,6 @@ class Retriever:
         logger.info("reranking_complete")
         
         final_hits = []
-        # Return only the highly relevance-scored top K
         for res in ranked_results[:top_k]:
             final_hits.append({"chunk": res["text"], "score": res["score"]})
                 

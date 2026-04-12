@@ -12,9 +12,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from config import logger
-from rag.ingestion import ingest, DB_PATH
-from rag.retriever import Retriever  # now named Retriever but handles async
+from config import logger, db, collection
+from rag.ingestion import ingest
+from rag.retriever import Retriever
 from rag.generator import generate_answer
 from verifier.similarity import compute_similarity
 from verifier.scoring import compute_hybrid_score
@@ -27,21 +27,23 @@ async def lifespan(app: FastAPI):
     logger.info("application_startup")
     docs_dir = Path("data/docs")
     
-    # If no DB_PATH exists, auto-ingest
-    if not os.path.exists(DB_PATH):
-        files = [str(p) for p in docs_dir.glob("*") if p.suffix == ".pdf"]
-        if files:
-            logger.info("auto_ingesting_startup", files=files)
-            await ingest(files)
-            
-    if os.path.exists(DB_PATH):
-        try:
+    # Check if we have data in MongoDB
+    try:
+        count = collection.count_documents({})
+        if count == 0:
+            files = [str(p) for p in docs_dir.glob("*") if p.suffix == ".pdf"]
+            if files:
+                logger.info("auto_ingesting_startup", files=files)
+                await ingest(files)
+                count = collection.count_documents({})
+                
+        if count > 0:
             _retriever = Retriever()
-            logger.info("retriever_loaded")
-        except Exception as e:
-            logger.error("retriever_load_failure", error=str(e))
-    else:
-        logger.warning("no_index_found")
+            logger.info("retriever_loaded", chunk_count=count)
+        else:
+            logger.warning("no_data_in_mongodb")
+    except Exception as e:
+        logger.error("startup_failed", error=str(e))
     yield
     logger.info("application_shutdown")
 
@@ -59,12 +61,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/", include_in_schema=False)
-async def serve_ui():
-    return FileResponse("static/index.html")
 
 
 class AskRequest(BaseModel):
@@ -108,7 +104,7 @@ def health():
         "features": [
             "Async Execution",
             "Advanced Unstructured Parsing",
-            "Hybrid Search (BM25 + Chroma)",
+            "Hybrid Search (BM25 + MongoDB)",
             "Cross-Encoder Re-ranking",
             "LLM-as-a-Judge Evaluation"
         ],
@@ -175,3 +171,10 @@ async def ask(req: AskRequest):
             judge_was_run = hybrid["judge_was_run"],
         ),
     )
+
+# MOUNT STATIC FILES AFTER ROUTES
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/", include_in_schema=False)
+async def serve_ui():
+    return FileResponse(os.path.join("static", "index.html"))

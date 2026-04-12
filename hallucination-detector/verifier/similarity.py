@@ -3,7 +3,7 @@ verifier/similarity.py -- Semantic Similarity Module (Phase 2) Async
 """
 
 import numpy as np
-from config import client, EMBEDDING_MODEL, logger
+from config import client, embed_model, logger
 
 THRESHOLDS = {
     "high":   0.8,
@@ -11,12 +11,9 @@ THRESHOLDS = {
 }
 
 async def _embed_async(texts: list[str]) -> np.ndarray:
-    logger.info("embedding_batch", size=len(texts))
-    response = await client.aio.models.embed_content(
-        model=EMBEDDING_MODEL,
-        contents=texts,
-    )
-    vectors = np.array([e.values for e in response.embeddings], dtype=np.float32)
+    logger.info("embedding_batch_local", size=len(texts))
+    vectors = embed_model.encode(texts)
+    vectors = np.array(vectors, dtype=np.float32)
     vectors = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
     return vectors
 
